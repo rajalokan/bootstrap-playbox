@@ -1,0 +1,158 @@
+heat_template_version: 2013-05-23
+
+description: >
+      HOT template to create the vm and networks for Alok Kumar
+
+parameters:
+    floating_network_id:
+        type: string
+        label: "Floating Network ID"
+        default: "updatetocorrectnetworkid"
+        description: The external network to allocate floating IP from
+        constraints:
+            - custom_constraint: neutron.network
+              description: Floating Network ID must be a type of network known to Neutron
+    image:
+        type: string
+        label: "Image ID"
+        default: "Ubuntu 14.04"
+        description: "Image ID to use"
+        constraints:
+            - custom_constraint: glance.image
+              description: "Must identify an image known to glance"
+
+    key_name:
+        type: string
+        label: "Key Name"
+        default: "alok"
+        description: "Key to be used for ssh access"
+        constraints:
+            - custom_constraint: nova.keypair
+              description: "Key must be a public keypair known to Nova"
+
+    flavor:
+        type: string
+        label: "Instance Flavor"
+        default: m1.medium
+        description: "Flavor of the booting instance"
+        constraints:
+            - custom_constraint: nova.flavor
+              description: "Instance flavor must be known to Nova"
+resources:
+    osalok_net:
+        type: OS::Neutron::Net
+        properties:
+            name: "osalok_net"
+
+    osalok_subnet:
+        type: OS::Neutron::Subnet
+        properties:
+            name: "osalok_subnet"
+            network_id: { get_resource: osalok_net }
+            cidr: '192.168.19.0/24'
+            gateway_ip: '192.168.19.1'
+            dns_nameservers:
+                - '8.8.8.8'
+
+    osalok_router:
+        type: OS::Neutron::Router
+        properties:
+            name: "osalok_router"
+            external_gateway_info:
+                network: { get_param: floating_network_id }
+
+    osalok_router_interface:
+        type: OS::Neutron::RouterInterface
+        properties:
+            subnet_id: { get_resource: osalok_subnet }
+            router_id: { get_resource: osalok_router }
+        depends_on:
+            - osalok_subnet
+            - osalok_net
+
+    osalok_secgroup:
+        type: OS::Neutron::SecurityGroup
+        properties:
+            description: "Security group for osalok"
+            rules:
+                - direction: egress
+                  protocol: tcp
+                  remote_ip_prefix: 0.0.0.0/0
+                - direction: egress
+                  protocol: udp
+                  remote_ip_prefix: 0.0.0.0/0
+                - direction: egress
+                  protocol: icmp
+                  remote_ip_prefix: 0.0.0.0/0
+                - direction: ingress
+                  protocol: tcp
+                  port_range_min: 22
+                  port_range_max: 22
+                  remote_ip_prefix: 0.0.0.0/0
+                - direction: ingress
+                  protocol: tcp
+                  port_range_min: 80
+                  port_range_max: 80
+                  remote_ip_prefix: 0.0.0.0/0
+                - direction: ingress
+                  protocol: tcp
+                  port_range_min: 443
+                  port_range_max: 443
+                  remote_ip_prefix: 0.0.0.0/0
+
+    osalok_port:
+        type: OS::Neutron::Port
+        properties:
+            network_id: { get_resource: osalok_net }
+            fixed_ips:
+                - subnet_id: { get_resource: osalok_subnet }
+            security_groups:
+                - { get_resource: osalok_secgroup }
+
+    osalok_floatingip:
+        type: OS::Neutron::FloatingIP
+        properties:
+            floating_network_id: { get_param: floating_network_id }
+
+    osalok_floatingip_association:
+        type: OS::Neutron::FloatingIPAssociation
+        properties:
+            port_id: { get_resource: osalok_port }
+            floatingip_id: { get_resource: osalok_floatingip }
+        depends_on:
+            - osalok_router_interface
+            - osalok_router
+            - osalok_port
+
+    osalok_instance:
+        type: OS::Nova::Server
+        properties:
+            name: "osalok"
+            image: { get_param: image }
+            flavor: { get_param: flavor }
+            key_name: { get_param: key_name }
+            user_data:
+                str_replace:
+                    template: |
+                        #!/bin/bash
+                        adduser --disabled-password --gecos "" okan && mkdir -p /home/okan/.ssh
+                        grep -q "^#includedir.*/etc/sudoers.d" /etc/sudoers || echo "#includedir /etc/sudoers.d" >> /etc/sudoers
+                        ( umask 226 && echo "okan ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/50_okan_user )
+                        cp /home/ec2-user/.ssh/authorized_keys /home/okan/.ssh/ && chown -R okan:okan /home/okan/.ssh && chmod -R 701 /home/okan/.ssh
+                        apt-get -y update
+                        DEBIAN_FRONTEND=noninteractive apt-get -y -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" dist-upgrade > /tmp/okanboot.log
+                        apt-get install -y git >> /tmp/okanboot.log
+                    params:
+                        $foo: "bar"
+            networks:
+                - port: { get_resource: osalok_port }
+        depends_on:
+            - osalok_floatingip
+
+outputs:
+    private_ips:
+        description: "Private IP address of the instance"
+        value: { get_attr: [ osalok_instance, first_address ]}
+    public_ip:
+        description: "Public IP address of the instance"
+        value: { get_attr: [ osalok_instance, floating_ip_address ]}
